@@ -49,13 +49,22 @@ def test_idle_beyond_budget_is_no_progress():
 
 
 def test_blocked_read_on_a_pipe_is_not_reported_healthy_forever():
-    r, w = os.pipe()  # nobody writes; the reader blocks forever
-    p = subprocess.Popen(["python3", "-c", f"import os; os.read({r}, 1)"])
-    os.close(w)
+    # The read end must be *inherited* and the write end must stay open, or the child sees EOF (or
+    # EBADF) and exits immediately — which is not a blocked read at all. That was the old shape of
+    # this test: the child died on `OSError: Bad file descriptor`, and the classifier called the
+    # resulting corpse NO-PROGRESS. It is now correctly named ZOMBIE, which is what exposed the bug
+    # in the fixture rather than in the detector.
+    r, w = os.pipe()
+    p = subprocess.Popen(
+        ["python3", "-c", f"import os; os.read({r}, 1)"], pass_fds=(r,)
+    )
     try:
         time.sleep(1.5)  # interpreter startup ticks are not the work
         v = observe([p.pid], unit_age=10.0)
         assert v.state in ("NO-PROGRESS", "STARVED"), v
+        assert v.state != "ZOMBIE", "the child must still be blocked, not exited"
     finally:
         p.kill()
+        p.wait()  # reap it: an unreaped child is exactly the condition this module now reports
         os.close(r)
+        os.close(w)

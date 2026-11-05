@@ -1,6 +1,6 @@
 {
   "name": "opencode-liveness",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Register every OpenCode tool call as a supervised operation with per-second liveness verdicts",
   "type": "module",
   "license": "MIT",

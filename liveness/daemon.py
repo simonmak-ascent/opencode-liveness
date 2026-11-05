@@ -28,6 +28,7 @@ import threading
 import time
 
 from . import classify as C
+from . import paths
 from . import sampler
 
 PROFILES = {
@@ -40,7 +41,7 @@ PROFILES = {
 
 LOCK = threading.Lock()
 OPS: dict[str, dict] = {}
-STATE_PATH = pathlib.Path("/run/opencode-liveness.json")
+STATE_PATH = paths.STATE
 LAST_PING = time.time()
 
 
@@ -49,6 +50,19 @@ def _record(op: dict, verdict: C.Verdict, age: float) -> None:
     op["detail"] = verdict.detail
     op["last_verdict_at"] = time.time()
     op["unit_age_s"] = age
+
+    if verdict.unreapable:
+        # A zombie is already dead. Escalating it to a kill produced the original bug: the signal was
+        # accepted by the kernel, discarded, and recorded as a successful kill. Surface it instead —
+        # visible in `jobstat`, never reaching level 3, never signalled.
+        op["zombie"] = {
+            "pids": verdict.zombies,
+            "detail": verdict.detail,
+        }
+        if op.get("level", 0) < 1:
+            op["level"] = 1
+        return
+
     profile = PROFILES[op.get("profile", "foreground")]
     level = op.get("level", 0)
     want = (
@@ -100,16 +114,60 @@ def _kill(op: dict) -> None:
         # SIGTERM here would terminate the harness that is supposed to survive.
         op["interrupt_requested"] = True
         return
-    for pid in sorted(op.get("pids", [])):
+
+    # Signal what the verdict was computed from — the registration *and* its descendants — because a
+    # descendant can trigger escalation while the registered pid is innocent.
+    targets = set(op.get("pids", [])) | sampler.process_tree(op.get("pids", []))
+
+    killed: list[int] = []
+    unreapable: list[dict] = []
+    failed: list[dict] = []
+
+    for pid in sorted(targets):
         if pid in op.get("protected", []):
+            continue
+        before = sampler.sample_pid(pid)
+        if before is None:
+            continue
+        if before.is_zombie:
+            # It has already exited. `os.kill` on a `Z` process returns 0 and does nothing, which is
+            # why the old code reported success. Only the parent calling wait() clears it.
+            unreapable.append(
+                {
+                    "pid": pid,
+                    "parent": before.ppid,
+                    "parent_comm": before.parent_comm or "?",
+                    "unreaped_s": round(before.age_s, 1),
+                }
+            )
             continue
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.kill(pid, sig)
-                time.sleep(0.2 if sig == signal.SIGTERM else 0)
             except ProcessLookupError:
-                pass
-    op["killed"] = True
+                break
+            time.sleep(0.2 if sig == signal.SIGTERM else 0)
+        after = sampler.sample_pid(pid)
+        # Gone means "no longer running". A `Z` process has executed its exit; the pid lingers only
+        # as the parent's bookkeeping, so it is gone for our purposes even though /proc still lists it.
+        if after is None or after.is_zombie:
+            killed.append(pid)
+        else:
+            failed.append({"pid": pid, "state": after.state, "wchan": after.wchan})
+
+    if killed:
+        op["killed_pids"] = killed
+    if unreapable:
+        op["unreapable"] = unreapable
+    if failed:
+        op["kill_failed"] = failed
+
+    # `killed` means "we signalled something and it is no longer running". A tree that was already
+    # dead before we acted is not a kill, and a pid that survived is not a success — a flag that says
+    # "killed" while the pid is still there is worse than no flag at all.
+    op["killed"] = bool(killed) and not failed
+    if op["killed"]:
+        op["state"] = "KILLED"
 
 
 def _loop(interval: float) -> None:
@@ -183,7 +241,9 @@ class Handler(socketserver.StreamRequestHandler):
                     OPS[op_id]["unit"] = msg.get("unit")
                     OPS[op_id]["level"] = 0
                     if msg.get("done"):
-                        OPS.pop(op_id, None)   # finished work must not linger as unhealthy
+                        OPS.pop(
+                            op_id, None
+                        )  # finished work must not linger as unhealthy
                 elif cmd == "status":
                     pass
                 payload = {"ops": OPS}
@@ -195,14 +255,17 @@ class Handler(socketserver.StreamRequestHandler):
 
 
 def main() -> int:
+    paths.ensure_dir()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--socket", default="/run/opencode-liveness.sock")
-    ap.add_argument("--state", default="/run/opencode-liveness.json")
+    ap.add_argument("--socket", default=str(paths.SOCKET))
+    ap.add_argument("--state", default=str(paths.STATE))
     ap.add_argument("--interval", type=float, default=1.0)
     args = ap.parse_args()
     global STATE_PATH
     STATE_PATH = pathlib.Path(args.state)
+    STATE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     sock = pathlib.Path(args.socket)
+    sock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if sock.exists():
         sock.unlink()
     # A client registers once, when its plugin loads. A daemon restart would otherwise erase every
@@ -216,7 +279,10 @@ def main() -> int:
                 op.setdefault("level", 0)
                 OPS[op_id] = op
             if saved:
-                print(f"restored {len(saved)} registration(s) from {STATE_PATH}", flush=True)
+                print(
+                    f"restored {len(saved)} registration(s) from {STATE_PATH}",
+                    flush=True,
+                )
         except Exception as exc:
             print(f"could not restore registrations: {exc}", flush=True)
 

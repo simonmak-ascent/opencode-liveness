@@ -5,7 +5,7 @@ Per-second liveness detection for operations an AI agent triggers. It answers on
 > **is this operation working, or is it merely alive?**
 
 A process that exists is not evidence. A process that is asleep is not evidence. This tool gives every
-registered operation one of **six named states**, checks it at 1 Hz against `/proc`, and escalates with
+registered operation one of **seven named states**, checks it at 1 Hz against `/proc`, and escalates with
 a stack dump and a kill that resumes from a ledger.
 
 ```
@@ -17,7 +17,10 @@ NO-PROGRESS        no cycle, but the unit ledger has not advanced inside its bud
 STARVED            alive, idle, producing nothing, not yet due
 ```
 
-The first three are healthy. The last three are escalated: warn → dump → kill → resume.
+The first three are healthy. `DEADLOCK`, `NO-PROGRESS` and `STARVED` are escalated: warn → dump →
+kill → resume. `ZOMBIE` is neither: the process has already exited, so it is reported with the
+parent that has to reap it and is **never signalled** — the kernel discards signals for a process
+awaiting `wait()`, which is why an earlier version "killed" a corpse and reported success.
 
 ## Why `WAITING-ON-CHILD` exists
 
@@ -107,6 +110,7 @@ output is a defect rather than a rounding error.
 
 ```bash
 python -m pytest tests/test_classify.py -q        # six states, synthetic, deterministic
+python -m pytest tests/test_zombie.py -q          # the seventh state, incl. a real unreaped child
 python -m pytest tests/test_inject_live.py -q     # real processes, real /proc
 ```
 

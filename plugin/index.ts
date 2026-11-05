@@ -12,7 +12,7 @@
 import { Plugin } from "@opencode/plugin"
 import { connect } from "node:net"
 
-const SOCKET = process.env.LIVENESS_SOCKET ?? "/tmp/opencode-liveness.sock"
+const SOCKET = process.env.LIVENESS_SOCKET ?? "/tmp/opencode-liveness/liveness.sock"
 const OP_ID = `session:${process.pid}`
 const TICK_MS = 10_000
 

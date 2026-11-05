@@ -8,7 +8,9 @@ import pathlib
 import sys
 import time
 
-STATE = pathlib.Path("/run/opencode-liveness.json")
+from . import paths
+
+STATE = paths.STATE
 
 
 def human(seconds: float | None) -> str:
@@ -46,6 +48,23 @@ def main() -> int:
             f"  {op_id:<22}{op.get('state', '?'):<18}{str(op.get('unit') or '-'):<16}"
             f"{human(op.get('unit_age_s')):>7}{op.get('level', 0):>5}"
         )
+
+    # A state name alone does not tell an operator what to do. These lines do: a zombie is dead and
+    # only its parent can clear it, and a kill that did not take is a fact worth printing at once.
+    for op_id, op in sorted(state.get("ops", {}).items()):
+        for u in op.get("unreapable", []):
+            print(
+                f"  ZOMBIE     {op_id}: pid {u['pid']} exited, parent {u['parent']}"
+                f" ({u.get('parent_comm', '?')}) has not called wait()"
+                f" (process age {human(u.get('unreaped_s'))}, an upper bound)"
+                " — no signal can clear it"
+            )
+        for f in op.get("kill_failed", []):
+            print(
+                f"  KILL FAILED {op_id}: pid {f['pid']} still running"
+                f" (state {f.get('state')}, wchan {f.get('wchan')})"
+            )
+
     unhealthy = [
         o
         for o in state.get("ops", {}).values()

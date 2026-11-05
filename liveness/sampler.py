@@ -6,11 +6,14 @@ thread, because a process can look asleep while one of its threads spins.
 
 from __future__ import annotations
 
+import os
 import pathlib
+import time
 
 from .classify import ProcSample
 
 PROC = pathlib.Path("/proc")
+HZ = os.sysconf("SC_CLK_TCK")
 
 
 def _read(path: pathlib.Path) -> str:
@@ -18,6 +21,13 @@ def _read(path: pathlib.Path) -> str:
         return path.read_text()
     except OSError:
         return ""
+
+
+def _uptime_s() -> float:
+    try:
+        return float(_read(PROC / "uptime").split()[0])
+    except (OSError, IndexError, ValueError):
+        return 0.0
 
 
 def sample_pid(pid: int) -> ProcSample | None:
@@ -39,7 +49,24 @@ def sample_pid(pid: int) -> ProcSample | None:
         elif line.startswith("write_bytes:"):
             write_bytes = int(line.split()[1])
     wchan = _read(PROC / str(pid) / "wchan").strip() or "-"
-    return ProcSample(pid, ppid, ticks, read_bytes, write_bytes, state, wchan)
+
+    # Only a zombie needs the extra two reads, and they are the whole point of the ZOMBIE state: who
+    # has to reap it, and for how long it has been sitting there unclaimed.
+    parent_comm = ""
+    age_s = 0.0
+    if state == "Z":
+        parent_comm = _read(PROC / str(ppid) / "comm").strip()
+        try:
+            start_ticks = int(rest[19])
+            up = _uptime_s()
+            if up:
+                age_s = max(0.0, up - start_ticks / HZ)
+        except (IndexError, ValueError):
+            pass
+
+    return ProcSample(
+        pid, ppid, ticks, read_bytes, write_bytes, state, wchan, parent_comm, age_s
+    )
 
 
 def process_tree(root_pids: list[int]) -> set[int]:
