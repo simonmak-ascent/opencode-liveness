@@ -55,10 +55,23 @@ def _record(op: dict, verdict: C.Verdict, age: float) -> None:
         # A zombie is already dead. Escalating it to a kill produced the original bug: the signal was
         # accepted by the kernel, discarded, and recorded as a successful kill. Surface it instead —
         # visible in `jobstat`, never reaching level 3, never signalled.
+        samples = [sampler.sample_pid(p) for p in verdict.zombies]
         op["zombie"] = {
             "pids": verdict.zombies,
             "detail": verdict.detail,
         }
+        # Populate `unreapable` here as well as in `_kill`, so a zombie that was merely *observed* is
+        # reported to the operator with its parent — not only one that survived a kill attempt.
+        op["unreapable"] = [
+            {
+                "pid": s.pid,
+                "parent": s.ppid,
+                "parent_comm": s.parent_comm or "?",
+                "unreaped_s": round(s.age_s, 1),
+            }
+            for s in samples
+            if s is not None
+        ]
         if op.get("level", 0) < 1:
             op["level"] = 1
         return
