@@ -76,6 +76,12 @@ def _record(op: dict, verdict: C.Verdict, age: float) -> None:
             op["level"] = 1
         return
 
+    # `zombie`/`unreapable` describe the current state, not history: once the parent reaps it, the
+    # line must disappear. A stale "ZOMBIE" that outlives the zombie is the same lie as a "killed"
+    # flag on a live pid. `kill_failed` is kept — that one is a real, historical failure.
+    op.pop("zombie", None)
+    op.pop("unreapable", None)
+
     profile = PROFILES[op.get("profile", "foreground")]
     level = op.get("level", 0)
     want = (
