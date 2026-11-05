@@ -64,6 +64,17 @@ def main() -> int:
                 f"  KILL FAILED {op_id}: pid {f['pid']} still running"
                 f" (state {f.get('state')}, wchan {f.get('wchan')})"
             )
+        for r in op.get("restart_results", []):
+            if r.get("ok"):
+                print(
+                    f"  RESTARTED  {op_id}: {r['detail']} —"
+                    f" {r['cleared']}/{r['of']} zombie(s) cleared"
+                )
+            else:
+                print(
+                    f"  RESTART FAILED {op_id}: parent {r['parent']} — {r['detail']}"
+                    f" ({r['cleared']}/{r['of']} cleared)"
+                )
 
     unhealthy = [
         o

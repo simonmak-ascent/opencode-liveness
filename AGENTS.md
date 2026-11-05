@@ -15,6 +15,7 @@ specific to this estate.
 
 ```bash
 python3 -m pytest tests/test_classify.py -q     # six states, synthetic, deterministic
+python3 -m pytest tests/test_zombie.py -q       # the seventh state, incl. a real unreaped child
 python3 -m pytest tests/test_inject_live.py -q  # real processes, real /proc
 python3 -m liveness.cli --state /run/opencode-liveness.json
 python3 -m liveness.daemon --socket /run/opencode-liveness.sock
@@ -24,8 +25,12 @@ Python 3.11+; standard library only. `py-spy` is optional and used for stack cap
 
 ## Rules
 
-- **The six states are the contract.** Do not add a seventh without a test that distinguishes it from
-  the other six on synthetic samples.
+- **The seven states are the contract.** A new state needs a test that distinguishes it from every
+  other one on synthetic samples — `ZOMBIE` was added that way, because a `Z` process is not a slow
+  process and not a starved one: it is dead, and it must never be escalated to a kill.
+- **Never signal a process that has already exited.** `os.kill` on a `Z` pid returns success and does
+  nothing; the only thing that clears a zombie is its parent calling `wait()`. The supervisor reports
+  the parent and sends nothing.
 - **`WAITING-ON-CHILD` must never be collapsed into `DEADLOCK`.** That distinction is why this
   repository exists; a parent waiting on a working child is the normal shape of every pipeline.
 - **Progress is set inclusion, never a counter.** A unit counts only when its output exists and hashes

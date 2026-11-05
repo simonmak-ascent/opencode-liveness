@@ -164,3 +164,120 @@ def test_the_agent_remedy_stays_an_interrupt():
     daemon._kill(op)
     assert op.get("interrupt_requested") is True
     assert "killed_pids" not in op
+
+
+# --------------------------------------------------------------------------- the remedy that works
+#
+# "Cannot be signalled" is not "cannot be fixed". A zombie clears when its parent restarts, and the
+# supervisor already knows the parent's pid. These tests pin that path, including its refusal to kill
+# a parent that nothing is supervising.
+
+
+def test_cgroup_parsing_finds_the_container():
+    text = "12:devices:/docker/3f2a1b4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e"
+    kind, ident = daemon.supervisor_from_cgroup(text)
+    assert kind == "docker"
+    assert ident.startswith("3f2a1b4c")
+
+
+def test_cgroup_parsing_finds_the_systemd_unit():
+    assert daemon.supervisor_from_cgroup(
+        "0::/system.slice/opencode-liveness.service"
+    ) == ("systemd", "opencode-liveness.service")
+
+
+def test_cgroup_parsing_refuses_an_unsupervised_process():
+    assert (
+        daemon.supervisor_from_cgroup("0::/user.slice/user-1000.slice/session-2.scope")
+        is None
+    )
+
+
+def test_restarting_the_parent_clears_the_zombies(monkeypatch):
+    zpid, ppid = 4242, 1234
+    zombie = s(zpid, ppid, 0, state="Z", parent_comm="next-server")
+    gone = {"v": False}
+
+    def fake_sample(pid):
+        if pid == zpid:
+            return None if gone["v"] else zombie
+        return zombie
+
+    def fake_restart(kind, ident):
+        gone["v"] = True  # the supervisor reaped the children
+        return True, f"{kind} restarted {ident}"
+
+    monkeypatch.setattr(daemon.sampler, "sample_pid", fake_sample)
+    monkeypatch.setattr(daemon, "_supervisor_of", lambda p: ("docker", "abc123def456"))
+    monkeypatch.setattr(daemon, "_restart", fake_restart)
+
+    op = {"remedy": "restart-parent"}
+    v = classify({}, {zpid: zombie}, last_unit_age_s=5, unit_budget_s=BUDGET)
+    daemon._reap_by_restart(op, v)
+
+    result = op["restart_results"][0]
+    assert result["ok"] is True
+    assert (result["cleared"], result["of"]) == (1, 1)
+    assert op["restart_attempts"] == 1
+
+
+def test_it_refuses_to_kill_an_unsupervised_parent(monkeypatch):
+    """Killing a parent nothing restarts would leave a dead service, which is worse than the zombie."""
+    zpid, ppid = 4243, 1235
+    zombie = s(zpid, ppid, 0, state="Z")
+    attempted: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(daemon.sampler, "sample_pid", lambda p: zombie)
+    monkeypatch.setattr(daemon, "_supervisor_of", lambda p: None)
+    monkeypatch.setattr(
+        daemon, "_restart", lambda k, i: attempted.append((k, i)) or (True, "")
+    )
+
+    op = {"remedy": "restart-parent"}
+    v = classify({}, {zpid: zombie}, last_unit_age_s=5, unit_budget_s=BUDGET)
+    daemon._reap_by_restart(op, v)
+
+    assert attempted == []
+    assert op["restart_results"][0]["action"] == "none"
+    assert op["restart_results"][0]["ok"] is False
+
+
+def test_restart_is_rate_limited(monkeypatch):
+    zpid, ppid = 4244, 1236
+    zombie = s(zpid, ppid, 0, state="Z")
+    attempted: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(daemon.sampler, "sample_pid", lambda p: zombie)
+    monkeypatch.setattr(daemon, "_supervisor_of", lambda p: ("systemd", "x.service"))
+    monkeypatch.setattr(
+        daemon, "_restart", lambda k, i: attempted.append((k, i)) or (True, "")
+    )
+
+    op = {"remedy": "restart-parent", "restart_at": time.time(), "restart_attempts": 1}
+    v = classify({}, {zpid: zombie}, last_unit_age_s=5, unit_budget_s=BUDGET)
+    daemon._reap_by_restart(op, v)
+
+    assert attempted == [], "a restart must not repeat inside the cooldown"
+    assert op["restart_attempts"] == 1
+
+
+def test_restart_gives_up_after_the_limit(monkeypatch):
+    zpid, ppid = 4245, 1237
+    zombie = s(zpid, ppid, 0, state="Z")
+    attempted: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(daemon.sampler, "sample_pid", lambda p: zombie)
+    monkeypatch.setattr(daemon, "_supervisor_of", lambda p: ("systemd", "x.service"))
+    monkeypatch.setattr(
+        daemon, "_restart", lambda k, i: attempted.append((k, i)) or (True, "")
+    )
+
+    op = {
+        "remedy": "restart-parent",
+        "restart_at": 0,
+        "restart_attempts": daemon.MAX_RESTARTS,
+    }
+    v = classify({}, {zpid: zombie}, last_unit_age_s=5, unit_budget_s=BUDGET)
+    daemon._reap_by_restart(op, v)
+
+    assert attempted == [], "three failed restarts is enough; stop touching production"

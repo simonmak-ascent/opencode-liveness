@@ -18,9 +18,11 @@ STARVED            alive, idle, producing nothing, not yet due
 ```
 
 The first three are healthy. `DEADLOCK`, `NO-PROGRESS` and `STARVED` are escalated: warn → dump →
-kill → resume. `ZOMBIE` is neither: the process has already exited, so it is reported with the
-parent that has to reap it and is **never signalled** — the kernel discards signals for a process
-awaiting `wait()`, which is why an earlier version "killed" a corpse and reported success.
+kill → resume. `ZOMBIE` is neither: the process has already exited and the kernel discards signals
+for it, which is why an earlier version "killed" a corpse and reported success. It is reported with
+the parent that owes a `wait()`, and with `remedy: "restart-parent"` the supervisor restarts that
+parent (systemd unit or container) so the runtime reaps the children — verified by re-sampling.
+It refuses to kill a parent that no supervisor owns, because that would leave a dead service.
 
 ## Why `WAITING-ON-CHILD` exists
 

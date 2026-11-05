@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socketserver
@@ -72,6 +73,10 @@ def _record(op: dict, verdict: C.Verdict, age: float) -> None:
             for s in samples
             if s is not None
         ]
+        if op.get("remedy") == "restart-parent":
+            # The only action that can actually clear a zombie: restart the parent so its supervisor
+            # reaps the children. Opt-in, rate-limited, and verified by re-sampling.
+            _reap_by_restart(op, verdict)
         if op.get("level", 0) < 1:
             op["level"] = 1
         return
@@ -187,6 +192,112 @@ def _kill(op: dict) -> None:
     op["killed"] = bool(killed) and not failed
     if op["killed"]:
         op["state"] = "KILLED"
+
+
+# ---------------------------------------------------------------------------
+# The only remedy that can actually clear a zombie.
+#
+# A `Z` process cannot be signalled. It disappears when its parent calls wait(), and the practical way
+# to make that happen is to restart the parent — the supervisor (systemd unit or container runtime)
+# then reaps every child and starts a fresh process. Refusing to signal and merely reporting is not a
+# fix; this is. It stays opt-in per operation (`remedy: "restart-parent"`), because restarting a
+# parent is a production action.
+# ---------------------------------------------------------------------------
+
+RESTART_TIMEOUT_S = 30.0
+RESTART_COOLDOWN_S = 300.0
+MAX_RESTARTS = 3
+
+
+def supervisor_from_cgroup(text: str) -> tuple[str, str] | None:
+    """Identify what can restart a process: a docker container or a systemd unit.
+
+    Pure, so the parsing is testable without a container runtime.
+    """
+    m = re.search(r"docker[-/]([0-9a-f]{12,64})", text)
+    if m:
+        return ("docker", m.group(1))
+    m = re.search(r"([A-Za-z0-9@:_.\-]+\.service)", text)
+    if m:
+        return ("systemd", m.group(1))
+    return None
+
+
+def _supervisor_of(pid: int) -> tuple[str, str] | None:
+    try:
+        return supervisor_from_cgroup(pathlib.Path(f"/proc/{pid}/cgroup").read_text())
+    except OSError:
+        return None
+
+
+def _restart(kind: str, ident: str) -> tuple[bool, str]:
+    cmd = {
+        "docker": ["docker", "restart", ident],
+        "systemd": ["systemctl", "restart", ident],
+    }[kind]
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=RESTART_TIMEOUT_S
+        )
+    except Exception as exc:  # a missing runtime must be reported, never crash the loop
+        return False, f"{kind} restart could not run: {exc}"
+    if res.returncode != 0:
+        return (
+            False,
+            f"{kind} restart exited {res.returncode}: {(res.stderr or '').strip()[:200]}",
+        )
+    return True, f"{kind} restarted {ident}"
+
+
+def _reap_by_restart(op: dict, verdict: C.Verdict) -> None:
+    """Restart the parents of the tracked zombies, then verify the zombies are actually gone."""
+    now = time.time()
+    if op.get("restart_attempts", 0) >= MAX_RESTARTS:
+        return
+    if now - float(op.get("restart_at") or 0) < RESTART_COOLDOWN_S:
+        return
+
+    parents: dict[int, list[int]] = {}
+    for pid in verdict.zombies:
+        sample = sampler.sample_pid(pid)
+        if sample is not None:
+            parents.setdefault(sample.ppid, []).append(pid)
+
+    results = []
+    for ppid, zids in parents.items():
+        target = _supervisor_of(ppid)
+        if target is None:
+            # Killing an unsupervised parent would leave a dead service behind, which is worse than
+            # the zombies. Say so rather than guess.
+            results.append(
+                {
+                    "parent": ppid,
+                    "action": "none",
+                    "ok": False,
+                    "cleared": 0,
+                    "of": len(zids),
+                    "detail": "no systemd unit or container owns this parent; "
+                    "refusing to kill an unsupervised process",
+                }
+            )
+            continue
+        kind, ident = target
+        ran, detail = _restart(kind, ident)
+        cleared = [z for z in zids if sampler.sample_pid(z) is None]
+        results.append(
+            {
+                "parent": ppid,
+                "action": kind,
+                "ok": ran and len(cleared) == len(zids),
+                "cleared": len(cleared),
+                "of": len(zids),
+                "detail": detail,
+            }
+        )
+
+    op["restart_at"] = now
+    op["restart_attempts"] = op.get("restart_attempts", 0) + 1
+    op["restart_results"] = results
 
 
 def _loop(interval: float) -> None:
