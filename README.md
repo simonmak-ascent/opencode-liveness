@@ -103,8 +103,12 @@ output is a defect rather than a rounding error.
 ## Design notes
 
 - Stack capture uses `py-spy dump --nonblocking`; `gdb` would stop the target.
-- The daemon is supervised by systemd `WatchdogSec`, and pings only when its sampler loop advances —
-  a heartbeat thread that pings while the work is frozen is the classic false-negative.
+- The daemon runs under systemd with `Restart=always`. It does **not** feed `WatchdogSec`: no module
+  calls `sd_notify`, and setting the watchdog without that killed a healthy daemon every ten seconds —
+  measured 38 restarts in ten minutes, each logged as `Failed with result 'watchdog'`. A watchdog
+  nothing feeds is a guaranteed crash loop, not a hang detector. A hung-but-alive daemon is therefore
+  **not** detected automatically: `jobstat` reports `WATCHDOG STALE` from the state file's age, and
+  nothing schedules it. The fix is for the sampler loop to send `WATCHDOG=1`.
 - `jobstat` exits non-zero and prints `WATCHDOG DOWN` when the daemon is absent. A watchdog nobody
   watches is worse than none.
 
