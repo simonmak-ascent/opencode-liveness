@@ -22,8 +22,17 @@ jobs:
         run: python -m pip install --quiet pytest
       - name: unit tests (six states, no processes)
         run: python -m pytest tests/test_classify.py -q
+      - name: deploy path (unit file, socket, watchdog)
+        # The installer writes the systemd unit, and a wrong unit is how the supervisor spent two
+        # releases listening on a socket no plugin read. These assert the script's own output.
+        run: python -m pytest tests/test_install_unit.py -q
       - name: live injection tests (real /proc)
         run: python -m pytest tests/test_inject_live.py -q
+      - name: any test file not named above
+        # The three steps above enumerate files, so a new test file is invisible until someone adds a
+        # step — which is exactly how `test_install_unit.py` and `test_zombie.py` came to run nowhere.
+        # This runs the directory; the enumeration above stays only for a readable failure name.
+        run: python -m pytest tests -q --ignore=tests/test_classify.py --ignore=tests/test_install_unit.py --ignore=tests/test_inject_live.py
       - name: cli smoke
         run: |
           python -m liveness.cli --state /nonexistent || test $? -eq 2

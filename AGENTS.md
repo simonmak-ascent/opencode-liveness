@@ -37,8 +37,13 @@ Python 3.11+; standard library only. `py-spy` is optional and used for stack cap
   to the ledger's record.
 - **Never make the wrapper itself a hang.** Every call to the daemon is bounded and fails open: a
   missing daemon must cost nothing.
-- **The daemon is supervised by systemd**, and it pings only when its sampler loop advances — a
-  heartbeat thread that pings while the work is frozen is the classic false negative.
+- **The daemon runs under `Restart=always` and does not feed `WatchdogSec`** — no module calls
+  `sd_notify`, so a watchdog would kill a healthy daemon rather than detect a hang (measured: 38
+  restarts in ten minutes before it was removed). A hung-but-alive daemon is therefore not detected
+  automatically; `jobstat` reports `WATCHDOG STALE` from the state file's age, and nothing schedules it.
+  The fix, when someone implements it, is `sd_notify(WATCHDOG=1)` from the sampler loop.
+- **A self-pinging heartbeat proves nothing** — a thread that pings while the work is frozen is the
+  classic false negative. That is why `progress` messages are the only input to NO-PROGRESS.
 
 ## Release
 

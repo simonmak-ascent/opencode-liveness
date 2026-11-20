@@ -8,8 +8,9 @@ Design constraints that came out of research, not preference:
   normal shape of every pipeline;
 * escalation is warn -> dump -> kill, and kill is only acceptable because the caller keeps a ledger
   to resume from;
-* this daemon is itself supervised by systemd (`WatchdogSec`), and `jobstat` says so loudly when it is
-  absent.
+* this daemon runs under systemd with `Restart=always`, and does not feed `WatchdogSec` — no module
+  calls `sd_notify`, so a watchdog would kill a healthy daemon rather than detect a hang. `jobstat`
+  reports `WATCHDOG STALE` from the state file's age when it is absent.
 
     python -m liveness.daemon --socket /run/opencode-liveness.sock --state /run/opencode-liveness.json
 """
